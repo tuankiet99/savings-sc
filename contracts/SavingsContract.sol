@@ -1,62 +1,104 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-contract SavingsContract {
-    address payable public owner;
-    mapping(address => uint) public balances;
-    mapping(address => uint) public depositTimes;
-    // uint itemFee = 0.001 ether;
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-    uint public interestRate = 3;
-
-    constructor() payable {
-        owner = payable(msg.sender);
-        balances[address(this)] += msg.value;
+contract SavingsContract is Ownable {
+    struct Saving {
+        uint amount;
+        uint depositTime;
+        uint term; // Thời hạn gửi tiền (số tháng)
     }
 
-    function isOwner() public view returns (bool) {
-        return msg.sender == owner;
+    mapping(address => Saving[]) public savings;
+    uint public interestRate6Months = 3; // Lãi suất 6 tháng (%)
+    uint public interestRate12Months = 4; // Lãi suất 12 tháng (%)
+    uint public balance;
+
+    constructor() payable Ownable(msg.sender) {
+        // Thêm tiền vào địa chỉ SC khi SC được khởi tạo
+        balance = msg.value;
     }
 
-    function deposit() external payable {
-        balances[msg.sender] += msg.value;
-        depositTimes[msg.sender] = block.timestamp;
+    function deposit(uint _amount, uint _term) external payable {
+        require(_amount >= 10, "Minimum deposit amount is 10 tokens.");
+        require(_term == 6 || _term == 12, "Invalid term.");
+
+        balance += _amount;
+        savings[msg.sender].push(
+            Saving({amount: _amount, term: _term, depositTime: block.timestamp})
+        );
     }
 
-    function withdraw(uint amount) external {
-        require(balances[msg.sender] >= amount, "Insufficient Ether balance.");
-
-        uint interest = calculateInterest(msg.sender, amount);
-        uint totalAmount = amount + interest;
-
+    function withdraw(uint _savingIndex) external {
         require(
-            balances[address(this)] >= interest,
-            "Insufficient contract balance for interest."
+            _savingIndex < savings[msg.sender].length,
+            "Invalid saving index."
         );
 
-        balances[msg.sender] -= amount;
-        balances[address(this)] -= interest;
-        payable(msg.sender).transfer(totalAmount);
-    }
+        Saving storage saving = savings[msg.sender][_savingIndex];
 
-    function withdrawForAdmin(address payable to, uint amount) external {
-        require(isOwner(), "Only the owner can withdraw for admin.");
         require(
-            balances[address(this)] >= amount,
+            block.timestamp >= saving.depositTime + saving.term * 30 days,
+            "The term has not expired yet."
+        );
+
+        uint interestRate;
+        // Kiểm tra kỳ hạn của khoản tiết kiệm là 6 tháng hay 12 tháng để xác định lãi suất áp dụng.
+        if (saving.term == 6) {
+            interestRate = interestRate6Months;
+        } else if (saving.term == 12) {
+            interestRate = interestRate12Months;
+        }
+        uint interest = calculateInterest(
+            interestRate,
+            saving.amount,
+            block.timestamp - saving.depositTime
+        );
+        uint totalAmount = saving.amount + interest;
+        // Kiểm tra tiền trong SC đủ để dư để thanh toán cho user không
+        require(
+            address(this).balance >= totalAmount,
             "Insufficient contract balance."
         );
+        delete savings[msg.sender][_savingIndex];
+        payable(msg.sender).transfer(totalAmount);
 
-        payable(to).transfer(amount);
-        balances[address(this)] -= amount;
+        balance -= totalAmount;
+    }
+
+    function withdrawForAdmin(
+        address payable _to,
+        uint _amount
+    ) external onlyOwner {
+        require(
+            address(this).balance >= _amount,
+            "Insufficient contract balance."
+        );
+        _to.transfer(_amount);
+
+        balance -= _amount;
+    }
+
+    function getBalance() external view onlyOwner returns (uint) {
+        return address(this).balance;
+    }
+
+    function setInterestRate(
+        uint _interestRate6Months,
+        uint _interestRate12Months
+    ) external onlyOwner {
+        interestRate6Months = _interestRate6Months;
+        interestRate12Months = _interestRate12Months;
     }
 
     function calculateInterest(
-        address account,
-        uint amount
-    ) internal view returns (uint) {
-        uint elapsedTime = block.timestamp - depositTimes[account];
-        uint annualInterest = (amount * interestRate) / 100;
-        uint interest = (elapsedTime * annualInterest) / 365 days;
+        uint _interestRate,
+        uint _amount,
+        uint _elapsedTime
+    ) internal pure returns (uint) {
+        uint annualInterest = (_amount * uint(_interestRate)) / 100;
+        uint interest = (_elapsedTime * annualInterest) / 365 days;
         return interest;
     }
 }
