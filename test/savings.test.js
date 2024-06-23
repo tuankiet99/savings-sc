@@ -1,50 +1,99 @@
 const { expect } = require("chai");
+const { ethers } = require("hardhat");
 
 describe("Savings Contract", function () {
   let savingsContract;
-  const depositAmount = ethers.parseEther("1.0");
-  const withdrawAmount = ethers.parseEther("0.5");
+  let _owner;
+  let _addr1;
 
-  async function deploySavingsContract() {
-    const [signer] = await ethers.getSigners();
+  beforeEach(async function () {
+    const [owner, addr1] = await ethers.getSigners();
     savingsContract = await ethers.deployContract("SavingsContract", [], {
       gasLimit: 4000000,
-      signer,
+      owner,
     });
+    _owner = owner;
+    _addr1 = addr1;
     await savingsContract.waitForDeployment();
-
-    console.log(`Savings Contract was deployed to ${savingsContract.target}`);
-    return savingsContract.target;
-  }
-
-  it("Should OK", async function () {
-    await deploySavingsContract();
   });
 
-  it("Should deposit and update balances correctly", async function () {
-    const [signer] = await ethers.getSigners();
-
-    // Deposit
-    await savingsContract.connect(signer).deposit({ value: depositAmount });
-
-    // Check balances
-    const signerBalance = await savingsContract.balances(signer.address);
-    console.log(" deposit - signerBalance: ", signerBalance);
-    expect(signerBalance).to.equal(depositAmount);
+  describe("Deployment", function () {
+    it("Should set the right owner", async function () {
+      expect(await savingsContract.owner()).to.equal(_owner.address);
+    });
   });
 
-  it("Should withdraw and update balances correctly", async function () {
-    const [signer] = await ethers.getSigners();
+  describe("Deposits", function () {
+    it("Should not allow deposits with invalid term", async function () {
+      const term = 3;
+      const depositAmount = ethers.parseEther("10");
 
-    // Deposit
-    await savingsContract.connect(signer).deposit({ value: depositAmount });
+      await expect(
+        savingsContract.connect(_addr1).deposit(term, { value: depositAmount })
+      ).to.be.revertedWith("Invalid term.");
+    });
 
-    // Withdraw
-    await savingsContract.connect(signer).withdraw(withdrawAmount);
+    it("Should allow deposits with valid term", async function () {
+      await savingsContract
+        .connect(_addr1)
+        .deposit(6, { value: ethers.parseEther("10") });
 
-    // Check balances
-    const signerBalance = await savingsContract.balances(signer.address);
-    console.log(" withdraw - signerBalance: ", signerBalance);
-    // expect(signerBalance).to.equal(depositAmount.sub(withdrawAmount));
+      const [amount, , term] = await savingsContract.getUserSaving(
+        _addr1.address,
+        0
+      );
+      expect(amount).to.equal(ethers.parseEther("10"));
+      expect(term).to.equal(6);
+    });
+  });
+
+  describe("Withdrawals", function () {
+    beforeEach(async function () {
+      const term = 6;
+      const depositAmount = ethers.parseEther("10");
+
+      await savingsContract
+        .connect(_addr1)
+        .deposit(term, { value: depositAmount });
+    });
+
+    it("Should not allow withdrawal before term ends", async function () {
+      await expect(
+        savingsContract.connect(_addr1).withdraw(0)
+      ).to.be.revertedWith("The term has not expired yet.");
+    });
+
+    it("Should not allow withdrawal with insufficient contract balance", async function () {
+      const term = 6;
+
+      await savingsContract
+        .connect(_owner)
+        .withdrawForAdmin(_owner.address, ethers.parseEther("5"));
+
+      // Fast-forward time by 6 months
+      await ethers.provider.send("evm_increaseTime", [
+        term * 30 * 24 * 60 * 60,
+      ]);
+      await ethers.provider.send("evm_mine");
+
+      await expect(
+        savingsContract.connect(_addr1).withdraw(0)
+      ).to.be.revertedWith("Insufficient contract balance.");
+    });
+
+    it("Should allow withdrawal after term ends", async function () {
+      const term = 6;
+      const expectWithdrawAmount = ethers.parseEther("10.15"); // 10 tokens (deposited) + 3% interest
+
+      // Fast-forward time by 6 months
+      await ethers.provider.send("evm_increaseTime", [
+        term * 30 * 24 * 60 * 60,
+      ]);
+      await ethers.provider.send("evm_mine");
+
+      await expect(() =>
+        savingsContract.connect(_addr1).withdraw(0)
+      ).to.changeEtherBalance(_addr1, expectWithdrawAmount);
+    });
   });
 });
